@@ -1,0 +1,147 @@
+---
+# vim:set fileformat=unix tabstop=2 shiftwidth=2 expandtab:
+# kate: end-of-line unix; space-indent on; indent-width 2; remove-trailing-spaces modified;
+
+# Strategy:
+# * Add host if its SSH key is not present in SSH known hosts files
+# * Do nothing if SSH host key is present in SSH known hosts files
+# * Fail if host has a offending SSH key in SSH known hosts files and force_overwrite_ssh_known_hosts is false
+# * Remove old SSH key and add new SSH key to first SSH known hosts file if offending SSH key exists in SSH known hosts
+#   files and force_overwrite_ssh_known_hosts is true
+
+- name: Read Ansible's SSH config
+  command:
+    cmd: >-
+      ssh
+        {{ lookup('config', 'ANSIBLE_SSH_ARGS') }}
+        {{ ansible_ssh_common_args }}
+        {{ ansible_ssh_extra_args }}
+        -G '{{ ansible_host }}'
+  changed_when: no
+  register: ssh_cfg_result
+
+- name: Extract SSH config entries
+  set_fact:
+    ssh_cfg_hashknownhosts: >-
+      {{ ssh_cfg_result.stdout
+        |string
+        |regex_search('^hashknownhosts .*$', multiline=True)
+        |regex_replace('^hashknownhosts ', '') }}
+    # Last regex_replace handles quoted spaces up to level 5, e.g.
+    # 'UserKnownHostsFile= a\ a b\\ c d\\\ d e\\\\ f g\\\\\ g h\\\\\\ i'
+    # is correctly split up to 'g\\\\\ g', but 'h\\\\\\ i' is not split anymore.
+    ssh_cfg_globalknownhostsfile: >-
+      {{ ssh_cfg_result.stdout
+        |string
+        |regex_search('^globalknownhostsfile .*$', multiline=True)
+        |regex_replace('^globalknownhostsfile ', '')
+        |regex_replace('((?<=[^\\\\]) )|((?<=[^\\\\]\\\\) )|((?<=[^\\\\]\\\\\\\\) )', '\n')
+      }}
+    ssh_cfg_userknownhostsfile: >-
+      {{ ssh_cfg_result.stdout
+        |string
+        |regex_search('^userknownhostsfile .*$', multiline=True)
+        |regex_replace('^userknownhostsfile ', '')
+        |regex_replace('((?<=[^\\\\]) )|((?<=[^\\\\]\\\\) )|((?<=[^\\\\]\\\\\\\\) )', '\n')
+      }}
+    ssh_cfg_result: !!null
+
+- name: Get SSH key
+  command:
+    cmd: ssh-keyscan {{ '-H' if ssh_cfg_hashknownhosts }} '{{ ansible_host }}'
+  changed_when: no
+  register: ssh_keyscan_result
+
+- name: Postprocess SSH keys
+  set_fact:
+    ssh_keys: "{{ ssh_keyscan_result.stdout_lines }}"
+    ssh_keyscan_result: !!null
+
+- name: Get stats of known hosts files
+  loop: "{{ [] + ssh_cfg_globalknownhostsfile.splitlines() + ssh_cfg_userknownhostsfile.splitlines() }}"
+  stat:
+    path: '{{ item|realpath }}'
+  register: known_hosts_stat_result
+
+- name: List existing known hosts files
+  set_fact:
+    known_hosts_paths: "{{
+      known_hosts_stat_result.results
+        |map(attribute='stat')
+        |selectattr('exists', 'equalto', True)
+        |map(attribute='path')
+        |list }}"
+    known_hosts_stat_result: !!null
+
+- name: Search for hostname in known hosts files
+  loop: '{{ known_hosts_paths }}'
+  command:
+    cmd: >-
+      ssh-keygen -F '{{ ansible_host }}' -f '{{ item|realpath }}'
+  changed_when: no
+  register: ssh_keygen_result
+  failed_when: ssh_keygen_result.rc not in [0, 1]
+
+- name: Postprocess SSH known hosts
+  loop: '{{ ssh_keygen_result.results }}'
+  set_fact:
+    # Compare SSH key from known host file (ssh-keygen) with SSH key received from host. Filter reject will remove
+    # comments from ssh-keygen output. Filter regex_replace will remove hostname from the beginning of string, because
+    # the hostname might be hashed and thus prevent comparison of keys.
+    offending_ssh_keys: "{{
+        item.stdout_lines
+            |reject('match', '^#.*$')
+            |map('regex_replace', '^[^ ]* ', '')
+            |list
+            |difference(
+                ssh_keys
+                  |map('regex_replace', '^[^ ]* ', '')
+                  |list
+            ) }}"
+    known_hosts: "{{
+        item.stdout_lines
+            |reject('match', '^#.*$')
+            |list }}"
+    known_hosts_path: '{{ item.item|realpath }}'
+  register: known_hosts_query
+
+- name: Fail if offending SSH keys have been found
+  loop: "{{ known_hosts_query.results }}"
+  when: not force_overwrite_ssh_known_hosts and item.ansible_facts.offending_ssh_keys|length > 0 # is not empty
+  fail:
+    msg: >
+      Offending SSH key for Ansible host {{ inventory_hostname }} ('{{ ansible_host }}') has been found
+      in {{ item.ansible_facts.known_hosts_path }}:
+      {{ item.ansible_facts.offending_ssh_keys|join('\n') }}
+
+- name: Remove offending SSH keys
+  loop: "{{ known_hosts_query.results }}"
+  when: force_overwrite_ssh_known_hosts and item.ansible_facts.offending_ssh_keys|length > 0 # is not empty
+  command:
+    cmd: ssh-keygen -R '{{ ansible_host }}' -f '{{ item.ansible_facts.known_hosts_path }}'
+
+- name: Add SSH key to known hosts file
+  # OpenSSH's source file sshconnect.c says that if host keys get added, then they get
+  # added to the first file (aka 'user_hostfiles[0]') in the list of hosts files.
+  # Ref.: https://github.com/openssh/openssh-portable/blob/master/sshconnect.c#L1182
+  loop: '{{ ssh_keys }}'
+  when: item|regex_replace('^[^ ]* ', '') not in
+          known_hosts_query.results
+            |map(attribute='ansible_facts')
+            |map(attribute='known_hosts')
+            |flatten
+            |map('regex_replace', '^[^ ]* ', '')
+            |list
+  lineinfile:
+    path: '{{ ssh_cfg_userknownhostsfile.splitlines()[0]|realpath }}'
+    line: '{{ item }}'
+    regexp: '^{{ item|regex_escape() }}$'
+
+- name: Debug role variables
+  debug:
+    msg:
+      ssh_keys: '{{ ssh_keys }}'
+      known_hosts_query: '{{ known_hosts_query }}'
+  tags:
+    - never
+    - debug
