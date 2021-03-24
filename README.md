@@ -21,7 +21,6 @@ then you may have a look at OpenSSH's option `StrictHostKeyChecking=accept-new` 
 
 **Tested OS images**
 - [Cloud images](https://cdimage.debian.org/cdimage/openstack/current/) of `Debian 10 (Buster)` \[`amd64`\]
-- [Cloud images](https://cdimage.debian.org/cdimage/openstack/testing/) of `Debian 11 (Bullseye)` \[`amd64`\]
 - [Generic cloud image](https://cloud.centos.org/centos/7/images/) of `CentOS 7 (Core)` \[`amd64`\]
 - [Generic cloud image](https://cloud.centos.org/centos/8/x86_64/images/) of `CentOS 8 (Core)` \[`amd64`\]
 - [Ubuntu cloud image](https://cloud-images.ubuntu.com/bionic/current/) of `Ubuntu 18.04 LTS (Bionic Beaver)` \[`amd64`\]
