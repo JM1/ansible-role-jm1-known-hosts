@@ -1,5 +1,10 @@
 # Ansible Role `jm1.known_hosts`
 
+:warning: **WARNING:**
+This role is not compatible to newer Ansible releases because they do not allow to extract the ssh config file and might
+not use the ssh connection plugin at all.
+:warning:
+
 This role helps with managing SSH known hosts files.
 If you do not need the functionality to overwrite offending SSH keys (variable `force_overwrite_ssh_known_hosts`),
 then you may have a look at OpenSSH's option `StrictHostKeyChecking=accept-new` instead.
